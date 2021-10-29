@@ -16,7 +16,9 @@ def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " 3700recv: " + string + "\n")
 
 MSG_SIZE = 1500
+DATA_SIZE = 1000
 TIMEOUT = 30
+NEXT_SEQ = 0
 
 # Bind to localhost and an ephemeral port
 UDP_IP = "127.0.0.1"
@@ -43,13 +45,13 @@ while True:
 
     try:
       decoded = json.loads(data.decode())
-
       # log("decoded:" + str(decoded))
-      # Send back an ack to the sender
       # if the sequence number is 0 then we know this is the handshake, send default ack mesg
       curr_sequence = decoded['sequence']
-      if (curr_sequence == 0):
-            default_handshake = json.dumps({"ack": str(curr_sequence + 1), "window": 5})
+      if (NEXT_SEQ == 0):
+            curr_sequence += 1
+            NEXT_SEQ = curr_sequence 
+            default_handshake = json.dumps({"ack": NEXT_SEQ, "window": 5})
             log("HANDSHAKE: ABOUT TO SEND " + default_handshake)
             sent = sock.sendto(default_handshake.encode(), addr)
             log("[sent] " + str(sent))
@@ -57,30 +59,36 @@ while True:
             continue
 
       # If the EOF flag is set, exit
-      elif (decoded['eof']):
+      elif (decoded["eof"]):
         log("[completed]")
         sys.exit(0)
 
       # If there is data, we accept it and print it out
       elif (decoded['data']):
-        data = b64decode(decoded['data'].encode())
-        # If we receive data, we assume it's in-order
-        # You will need to do much more here
-        log("[recv data] " + str(decoded['sequence']) + " (" + str(len(data)) + ") ACCEPTED (in-order)")
-        sys.stdout.buffer.write(data)
-
-    
-
-
-      msg = json.dumps({"ack": decoded['sequence'] + len(data)})
-      log("ABOUT TO SEND " + msg)
-      sent = sock.sendto(msg.encode(), addr)
-      log("[sent] " + str(sent))
-      if sent < len(msg):
-        log("[error] unable to fully send packet")
+        log(str(decoded['sequence']))
+        # This is not a duplicate data
+        if decoded['sequence'] == NEXT_SEQ:
+          data = b64decode(decoded['data'].encode())
+          # If we receive data, we assume it's in-order
+          # You will need to do much more here
+          log("[recv data] " + str(NEXT_SEQ) + " (" + str(len(data)) + ") ACCEPTED (in-order)")
+          sys.stdout.buffer.write(data)
+          updated_seq = decoded['sequence'] + len(data)
+          msg = json.dumps({"ack": next_seq})
+          log("ABOUT TO SEND " + msg)
+          sent = sock.sendto(msg.encode(), addr)
+          log("[sent_bytes] " + str(sent))
+          NEXT_SEQ = updated_seq
+          if sent < len(msg):
+            log("[error] unable to fully send packet")
+        else:
+          # Ignore duplicate
+          # TODO: How to handle packet drops from receiver's end
+          pass
 
     except (ValueError, KeyError, TypeError) as e:
       log("[recv corrupt packet]")
+      print(decoded)
       raise e
   else:
     log("[error] timeout")
