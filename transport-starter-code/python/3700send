@@ -11,17 +11,19 @@ import socket
 import time
 
 from base64 import b64encode
-
+from collections import namedtuple
 
 MSG_SIZE = 1500
 DATA_SIZE = 1000
 TIMEOUT = 30
 SEQUENCE = 0
-
+RTT = 0
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
 UDP_IP = IP_PORT[0:IP_PORT.find(":")]
 UDP_PORT = int(IP_PORT[IP_PORT.find(":")+1:])
+# To be dict of {SEQUENCE_NUM: ('msg': packet, 'rtt_start': time_sent_at)}
+BUFFER = {}
 dest = (UDP_IP, UDP_PORT)
 
 time.sleep(.5)
@@ -30,51 +32,85 @@ time.sleep(.5)
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
 sock.settimeout(TIMEOUT)
 
+# PacketInfo tuple for use in BUFFER
+PacketInfo = namedtuple('PacketInfo', ['msg', 'rtt_start'])
+
 def log(string):
   sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " 3700send: " + string + "\n")
 
+
+def calculate_rtt(start, stop):
+  """Calculates round trip time estimate"""
+  # TODO:intial RTT: if RTT == 0: RTT = stop - start ??
+  global RTT
+  # Recommended α: 0.8-0.9 (0.875 for most TCPs)
+  alpha = .875
+  sample = stop - start
+  new_rtt = (alpha * RTT) + ((1 - alpha) * sample)
+  RTT = new_rtt
+  
+
 def send_next_packet():
+  """Send the next packet in a sequence, and return the sent packet, and the time it was sent at"""
+  #"global" required here to be able to read and write to SEQUENCE 
   global SEQUENCE
   
   data = sys.stdin.buffer.read(DATA_SIZE)
   if (len(data) > 0):
     #print("sending", str(b64encode(data)))
+    rtt_start = time.time()
     msg = json.dumps({"sequence": SEQUENCE, "data": b64encode(data).decode(), "ack": False, "eof": False})
     if sock.sendto(msg.encode(), dest) < len(msg):
       log("[error] unable to fully send packet")
     else:
       log("[send data] " + str(SEQUENCE) + " (" + str(len(data)) + ")")
     SEQUENCE += len(data)
-    return True
+    # return the msg and since we need to store them until acknowledgement
+    return  PacketInfo(msg, rtt_start)
   else:
     return False
 
+def perform_handshake():
+  global SEQUENCE
+  # perform 3 way handshake and get advertised window
+  handshake_sequ = json.dumps({"sequence": SEQUENCE})
+  rtt_start = time.time()
+  sock.sendto(handshake_sequ.encode(), dest)
+  # ensure that we have receieved a proper ack back
+  handshake_ack = sock.recvfrom(MSG_SIZE)
+  (data, addr) = handshake_ack
+  decoded_ack = json.loads(data.decode())
+  rtt_stop = time.time()
+  if (int(decoded_ack["ack"]) != SEQUENCE + 1):
+    raise Exception("HANDSHAKE FAILED")
+  # Calculate RTT
+  calculate_rtt(rtt_start, rtt_stop)
+  # update sequence
+  SEQUENCE += int(decoded_ack["ack"])
+  window = decoded_ack["window"]
+  return window
 
-# perform 3 way handshake
-handshake_sequ = json.dumps({"sequence": SEQUENCE})
-sock.sendto(handshake_sequ.encode(), dest)
-# ensure that we have receieved a proper ack back
-handshake_ack = sock.recvfrom(MSG_SIZE)
-(data, addr) = handshake_ack
-decoded_ack = json.loads(data.decode())
-if (int(decoded_ack["ack"]) != 1):
-      raise Exception("HANDSHAKE FAILED")
-# update sequence
-SEQUENCE += int(decoded_ack["ack"])
-window = decoded_ack["window"]
+def init_sliding_window(window):
+  global SEQUENCE, BUFFER
+  for x in range(window):
+    sent_packet = send_next_packet()
+    if sent_packet:
+      # Store window_size number of packets.
 
+      BUFFER[SEQUENCE] = sent_packet
+      print("sent a packet")
+      continue
+    else:
+      break
 
-# send number of packets that window is sized to
-for x in range(window):
-  if send_next_packet():
-        print("sent a packet")
-        continue
-  else:
-        break
+# Setup connection
+window = perform_handshake()
 
+# Start sliding window
+init_sliding_window(window)
 
 # Now read in data, send packets
-while True:
+while True and BUFFER:
   log("ABOUT TO SLEEP")
   result = sock.recvfrom(MSG_SIZE)
 
@@ -82,17 +118,28 @@ while True:
     (data, addr) = result
     try:
       decoded = json.loads(data.decode())
+      rtt_stop = time.time()
       log("[recv pkt] " + str(decoded))
       log("[recv ack] " + str(decoded['ack']))
 
       # If there is an ack, send next packet
-      if decoded['ack'] == SEQUENCE:
+      lowest_seq = min(BUFFER.keys())
+      if decoded['ack'] == lowest_seq:
+        # Remove the ack-ed sequence from the buffer and get the stored value
+        acked_packet = BUFFER.pop(lowest_seq)
+        rtt_start = acked_packet.rtt_start
+        calculate_rtt(rtt_start, rtt_stop)
         # Try to send next packet; break if no more data
-
-  
-        if (not send_next_packet()):
-          break
-    except (ValueError, KeyError, TypeError):
+        sent_packet = send_next_packet()
+        if sent_packet:
+          BUFFER[SEQUENCE] = sent_packet
+        else:
+          # break
+          # TODO: Wait until RTO is reached and retransmit
+          pass
+    except (ValueError, KeyError, TypeError) as e:
+      print(e)
+      
       log("[recv corrupt packet]")
   else:
     log("[error] timeout")
