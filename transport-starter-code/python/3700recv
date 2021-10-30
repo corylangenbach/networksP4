@@ -74,7 +74,7 @@ while True:
           log("[recv data] " + str(NEXT_SEQ) + " (" + str(len(data)) + ") ACCEPTED (in-order)")
           sys.stdout.buffer.write(data)
           updated_seq = decoded['sequence'] + len(data)
-          msg = json.dumps({"ack": next_seq})
+          msg = json.dumps({"ack": updated_seq})
           log("ABOUT TO SEND " + msg)
           sent = sock.sendto(msg.encode(), addr)
           log("[sent_bytes] " + str(sent))
