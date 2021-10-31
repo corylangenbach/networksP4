@@ -74,8 +74,9 @@ def send_next_packet():
   data = sys.stdin.buffer.read(DATA_SIZE)
   if (len(data) > 0):
     rtt_start = time.time()
-    msg_obj = {"sequence": SEQUENCE, "data": b64encode(data).decode(), "ack": False, "eof": False}
+    msg_obj = {"sequence": SEQUENCE, "data": b64encode(data).decode(), "ack": True, "eof": False}
     if handle_packet_send(msg_obj):
+      log(f"Sequence number: " + str(SEQUENCE))
       SEQUENCE += len(data)
       log(f'updating sender seq: {SEQUENCE}')
       return PacketInfo(msg_obj, rtt_start)
@@ -90,13 +91,28 @@ def perform_handshake():
   log(f'Starting handshake: {handshake_sequ}')
   sock.sendto(handshake_sequ.encode(), dest)
   # ensure that we have receieved a proper ack back
-  handshake_ack = sock.recvfrom(MSG_SIZE)
-  (data, addr) = handshake_ack
-  decoded_ack = json.loads(data.decode())
-  log(f'decoded_ack: {decoded_ack}')
-  rtt_stop = time.time()
-  if (int(decoded_ack["ack"]) != SEQUENCE + 1):
-    raise Exception("HANDSHAKE FAILED")
+  while True:
+    try:
+      sock.settimeout(1)
+      handshake_ack = sock.recvfrom(MSG_SIZE)
+      (data, addr) = handshake_ack
+      decoded_ack = json.loads(data.decode())
+      log(f'decoded_ack: {decoded_ack}')
+      rtt_stop = time.time()
+      if (int(decoded_ack["ack"]) != SEQUENCE + 1):
+        # send msg again
+        sock.sendto(handshake_sequ.encode(), dest)
+      else:
+        break
+    except:
+      sock.sendto(handshake_sequ.encode(), dest)
+      log(f'No message receieved. Send new packet')
+      continue
+
+  # perform third part of handshake
+  third_handshake = json.dumps({"sequence": SEQUENCE, "data": "", "ack": True, "eof": False})
+  sock.sendto(third_handshake.encode(), dest)
+  
   # Calculate RTT
   calculate_rtt(rtt_start, rtt_stop)
   # update sequence
@@ -140,7 +156,7 @@ while True and BUFFER:
         # If there is an ack, send next packet
         lowest_seq = min(BUFFER.keys())
 
-        if decoded['ack'] == lowest_seq:
+        if decoded['ack'] == lowest_seq and not decoded.get("window"):
           print('removing ' + str(lowest_seq) + "from buffer")
           # Remove the ack-ed sequence from the buffer and get the stored value
           acked_packet = BUFFER.pop(lowest_seq)
@@ -160,6 +176,7 @@ while True and BUFFER:
           continue
         # Ack received out of sequence, meaning that a packet was dropped before from receiver to sender
         else:
+          log("looking through receievd acks!!!!")
           resend = True
           # we want to add the received ack to RECEIVED_ACKS, and also check if any acks in received acks are now in order
           RECEIVED_ACKS.append(decoded)
@@ -218,5 +235,5 @@ while True and BUFFER:
       # Update the packet in the buffer with the new time sent at
       BUFFER[seq] = new_packet_info
 
-sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}).encode(), dest)
+sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": True}).encode(), dest)
 sys.exit(0)
