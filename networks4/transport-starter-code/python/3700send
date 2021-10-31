@@ -10,8 +10,9 @@ import sys
 import socket
 import time
 import copy
+import math
 
-from base64 import b64encode
+from base64 import b64encode, b64decode
 from collections import namedtuple
 
 MSG_SIZE = 1500
@@ -51,11 +52,13 @@ def calculate_rtt(start, stop):
   # Recommended α: 0.8-0.9 (0.875 for most TCPs)
     alpha = .875
     sample = stop - start
-    new_rtt = (alpha * RTT) + ((1 - alpha) * sample)
+    new_rtt = (alpha * RTT) + ((1 - alpha) *sample)
     RTT = new_rtt
+  sock.settimeout(math.ceil(2 * RTT))
   
 def handle_packet_send(msg_obj):
-  data = msg_obj['data']
+  global SEQUENCE
+  data = b64decode(msg_obj['data'].encode())
   msg = json.dumps(msg_obj)
   if sock.sendto(msg.encode(), dest) < len(msg):
     log("[error] unable to fully send packet")
@@ -74,6 +77,7 @@ def send_next_packet():
     msg_obj = {"sequence": SEQUENCE, "data": b64encode(data).decode(), "ack": False, "eof": False}
     if handle_packet_send(msg_obj):
       SEQUENCE += len(data)
+      log(f'updating sender seq: {SEQUENCE}')
       return PacketInfo(msg_obj, rtt_start)
     return False
 
@@ -83,11 +87,13 @@ def perform_handshake():
   handshake_sequ = json.dumps({"sequence": SEQUENCE, "data": "", "ack": False, "eof": False})
   # eof and ack keys used in recv
   rtt_start = time.time()
+  log(f'Starting handshake: {handshake_sequ}')
   sock.sendto(handshake_sequ.encode(), dest)
   # ensure that we have receieved a proper ack back
   handshake_ack = sock.recvfrom(MSG_SIZE)
   (data, addr) = handshake_ack
   decoded_ack = json.loads(data.decode())
+  log(f'decoded_ack: {decoded_ack}')
   rtt_stop = time.time()
   if (int(decoded_ack["ack"]) != SEQUENCE + 1):
     raise Exception("HANDSHAKE FAILED")
@@ -105,7 +111,8 @@ def init_sliding_window(window):
     if sent_packet:
       # Store packets in buffer.
       BUFFER[SEQUENCE] = sent_packet
-      print("sent a packet at SEQ: " + str(SEQUENCE))
+      # handle_packet_send has similar log
+      # log("sent a packet at SEQ: " + str(SEQUENCE))
       continue
     else:
       break
@@ -119,95 +126,97 @@ init_sliding_window(window)
 # Now read in data, send packets
 while True and BUFFER:
   #log("ABOUT TO SLEEP")
-  result = sock.recvfrom(MSG_SIZE)
+  try:
+    result = sock.recvfrom(MSG_SIZE)
 
-  if result:
-    (data, addr) = result
-    try:
-      decoded = json.loads(data.decode())
-      rtt_stop = time.time()
-      log("[recv pkt] " + str(decoded))
-      log("[recv ack] " + str(decoded['ack']))
+    if result:
+      (data, addr) = result
+      try:
+        decoded = json.loads(data.decode())
+        rtt_stop = time.time()
+        log("[recv pkt] " + str(decoded))
+        log("[recv ack] " + str(decoded['ack']))
 
-      # If there is an ack, send next packet
-      lowest_seq = min(BUFFER.keys())
+        # If there is an ack, send next packet
+        lowest_seq = min(BUFFER.keys())
 
-      if decoded['ack'] == lowest_seq:
-        print('removing ' + str(lowest_seq) + "from buffer")
-        # Remove the ack-ed sequence from the buffer and get the stored value
-        acked_packet = BUFFER.pop(lowest_seq)
-        rtt_start = acked_packet.rtt_start
-        calculate_rtt(rtt_start, rtt_stop)
-        # Try to send next packet
-        sent_packet = send_next_packet()
-        if sent_packet:
-          BUFFER[SEQUENCE] = sent_packet
+        if decoded['ack'] == lowest_seq:
+          print('removing ' + str(lowest_seq) + "from buffer")
+          # Remove the ack-ed sequence from the buffer and get the stored value
+          acked_packet = BUFFER.pop(lowest_seq)
+          rtt_start = acked_packet.rtt_start
+          calculate_rtt(rtt_start, rtt_stop)
+          # Try to send next packet
+          sent_packet = send_next_packet()
+          if sent_packet:
+            BUFFER[SEQUENCE] = sent_packet
+          else:
+            # No more packets to send. Wait for other acks
+            print('packet not sent')
+            pass
+        elif int(decoded['ack']) <= lowest_seq - DATA_SIZE:
+          # ignore duplicate packet
+          log('duplicate packet received. ack: ' + str(decoded['ack']))
+          continue
+        # Ack received out of sequence, meaning that a packet was dropped before from receiver to sender
         else:
-          # No more packets to send. Wait for other acks
-          print('packet not sent')
-          pass
-      elif int(decoded['ack']) <= lowest_seq - DATA_SIZE:
-        # ignore duplicate packet
-        log('duplicate packet received. ack: ' + str(decoded['ack']))
-        continue
-      # Ack received out of sequence, meaning that a packet was dropped before from receiver to sender
-      else:
-        resend = True
-        # we want to add the received ack to RECEIVED_ACKS, and also check if any acks in received acks are now in order
-        RECEIVED_ACKS.append(result)
-        for ack in RECEIVED_ACKS:
-          (data, addr) = ack
-          decoded = json.loads(data.decode())
-          lowest_seq = min(BUFFER.keys())
-          if decoded['ack'] == lowest_seq:
-            resend = False
-            print('removing ' + str(lowest_seq) + "from buffer")
-            # Remove the ack-ed sequence from the buffer and get the stored value
-            acked_packet = BUFFER.pop(lowest_seq)
-            rtt_start = acked_packet.rtt_start
-            calculate_rtt(rtt_start, rtt_stop)
-            # Try to send next packet
-            sent_packet = send_next_packet()
-            if sent_packet:
-              BUFFER[SEQUENCE] = sent_packet
-            else:
-              # No more packets to send. Wait for other acks
-              print('packet not sent')
-              pass
+          resend = True
+          # we want to add the received ack to RECEIVED_ACKS, and also check if any acks in received acks are now in order
+          RECEIVED_ACKS.append(decoded)
+          for decoded in RECEIVED_ACKS:
+            # (data, addr) = ack
+            # decoded = json.loads(data.decode())
+            lowest_seq = min(BUFFER.keys())
+            if decoded['ack'] == lowest_seq:
+              resend = False
+              print('removing ' + str(lowest_seq) + "from buffer")
+              # Remove the ack-ed sequence from the buffer and get the stored value
+              acked_packet = BUFFER.pop(lowest_seq)
+              rtt_start = acked_packet.rtt_start
+              calculate_rtt(rtt_start, rtt_stop)
+              # Try to send next packet
+              sent_packet = send_next_packet()
+              if sent_packet:
+                BUFFER[SEQUENCE] = sent_packet
+              else:
+                # No more packets to send. Wait for other acks
+                print('packet not sent')
+                pass
+          temp = decoded['ack']
+          print(f'decoded_ack: {temp}, lowest_seq: {lowest_seq}')
+          # Get packet with lowest sequence
+          not_acked = BUFFER[lowest_seq]
+          #print(f'Not acked: {not_acked}')
 
-
-
-        temp = decoded['ack']
-        print(f'decoded_ack: {temp}, lowest_seq: {lowest_seq}')
-        # Get packet with lowest sequence
-        not_acked = BUFFER[lowest_seq]
-        #print(f'Not acked: {not_acked}')
-
-        # If packet has taken longer than 2x RTT, Resend packets in buffer
-        if rtt_stop - not_acked.rtt_start > 2 * RTT:
-        # TODO: Or, do we always want to do this?
-        #if resend: 
-          #buff_keys_copy = copy.deepcopy(BUFFER.keys())
-          for seq in BUFFER.keys():
-            packet_info = BUFFER[seq]
-            msg_obj = packet_info.msg
-            new_start = time.time()
-            handle_packet_send(msg_obj)
-            new_packet_info = PacketInfo(msg_obj, new_start)
-            # Update the packet in the buffer with the new time sent at
-            #BUFFER.update(seq = new_packet_info)
-            # TODO: I think this makes more sense???
-            BUFFER[seq] = new_packet_info
-        else:
-          # RTO time hasn't passed
-          # TODO: What should be be doing here
-          pass
-    except (ValueError, KeyError, TypeError) as e:
-      print(e)
-      log("[recv corrupt packet]")
-  else:
-    log("[error] timeout")
-    sys.exit(-1)
+          if resend:
+          # TODO: Or, do we always want to do this?
+            #buff_keys_copy = copy.deepcopy(BUFFER.keys())
+            for seq in BUFFER.keys():
+              packet_info = BUFFER[seq]
+              msg_obj = packet_info.msg
+              new_start = time.time()
+              handle_packet_send(msg_obj)
+              new_packet_info = PacketInfo(msg_obj, new_start)
+              # Update the packet in the buffer with the new time sent at
+              BUFFER[seq] = new_packet_info
+      
+      except (ValueError, KeyError, TypeError) as e:
+        print(e)
+        log("[recv corrupt packet]")
+    # else:
+    #   # TODO: possible packet drop from 3700recv?
+    #   log("[error] timeout")
+    #   sys.exit(-1)
+  except socket.timeout:
+    # If packet has taken longer than 2x RTT, Resend packets in buffer
+    for seq in BUFFER.keys():
+      packet_info = BUFFER[seq]
+      msg_obj = packet_info.msg
+      new_start = time.time()
+      handle_packet_send(msg_obj)
+      new_packet_info = PacketInfo(msg_obj, new_start)
+      # Update the packet in the buffer with the new time sent at
+      BUFFER[seq] = new_packet_info
 
 sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}).encode(), dest)
 sys.exit(0)

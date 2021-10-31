@@ -87,17 +87,12 @@ while True:
 
       # If there is data, we accept it and print it out
       elif (decoded['data']):
-        log(str(decoded['sequence']))
+        log('SEQ: ' + str(decoded['sequence']))
+        log('NEXT_SEQ: ' + str(NEXT_SEQ))
         # This is not a duplicate data
+        data = b64decode(decoded['data'].encode())
 
         if decoded['sequence'] == NEXT_SEQ:
-          data = b64decode(decoded['data'].encode())
-          # If we receive data, we assume it's in-order
-          # You will need to do much more here
-
-          # we want to send the ack until we receieve more data fom the sender. This means the ack got there 
-          #result = sock.recvfrom(MSG_SIZE)
-
           log("[recv data] " + str(NEXT_SEQ) + " (" + str(len(data)) + ") ACCEPTED (in-order)")
           sys.stdout.buffer.write(data)
           updated_seq = decoded['sequence'] + len(data)
@@ -124,8 +119,8 @@ while True:
           for result in OUT_OF_ORDER_PACKETS:
             (data, addr) = result
             stored_decoded = json.loads(data.decode())
+            data = b64decode(stored_decoded['data'].encode())
             if stored_decoded['sequence'] == NEXT_SEQ:
-              data = b64decode(stored_decoded['data'].encode())
               log("[recv (old) data] " + str(NEXT_SEQ) + " (" + str(len(data)) + ") ACCEPTED (now-in-order)")
               sys.stdout.buffer.write(data)
               updated_seq = stored_decoded['sequence'] + len(data)
