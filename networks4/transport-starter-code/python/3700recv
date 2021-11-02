@@ -45,6 +45,7 @@ SENT_ACKS = []
 
 # Now listen for packets
 while True:
+  log("listening for packets")
   # result = None
   # if new_data == None:
   #   result = sock.recvfrom(MSG_SIZE)
@@ -89,18 +90,23 @@ while True:
 
 
       # If the EOF flag is set, exit
-      elif (decoded["eof"]):
+      if (decoded["eof"]):
         log("[completed]")
         # TODO: send ack back saying you've received?
+        for x in range(15):
+            last_msg = json.dumps({"eof": True, "data": "", "sequence": decoded["sequence"], "ack": True})
+            sent = sock.sendto(last_msg.encode(), addr)
+    
         sys.exit(0)
 
 
       # TODO: for the last packet this is happening continuously and shouldnt be
-      elif (result in SENT_ACKS):
+      if (result in SENT_ACKS):
+        log("looking through already sent acks")
         (data, addr) = result
         stored_decoded = json.loads(data.decode())
         data = b64decode(stored_decoded['data'].encode())
-        updated_seq = stored_decoded['sequence']
+        updated_seq = stored_decoded['sequence'] + len(data)
         msg = json.dumps({"ack": updated_seq})
         sent = sock.sendto(msg.encode(), addr)
         log("[sent_ack_again] " + str(sent))  
@@ -154,7 +160,7 @@ while True:
               last_addr = addr
 
               sent = sock.sendto(msg.encode(), addr)
-              log("[sent_bytes] " + str(sent))
+              log("[sent_bytes] " + str(sent) + "packet: " + str(msg))
               SENT_ACKS.append(result)
               NEXT_SEQ = updated_seq
               if sent < len(msg):

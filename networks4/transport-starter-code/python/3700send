@@ -19,7 +19,7 @@ MSG_SIZE = 1500
 DATA_SIZE = 1000
 TIMEOUT = 30
 SEQUENCE = 0
-RTT = 0
+RTT = 1
 RECEIVED_ACKS = []
 # Bind to localhost and an ephemeral port
 IP_PORT = sys.argv[1]
@@ -46,14 +46,11 @@ def calculate_rtt(start, stop):
   """Calculates round trip time estimate"""
   # TODO:intial RTT: if RTT == 0: RTT = stop - start ??
   global RTT
-  if RTT == 0:
-    RTT = stop - start
-  else:
   # Recommended α: 0.8-0.9 (0.875 for most TCPs)
-    alpha = .875
-    sample = stop - start
-    new_rtt = (alpha * RTT) + ((1 - alpha) *sample)
-    RTT = new_rtt
+  alpha = .875
+  sample = stop - start
+  new_rtt = (alpha * RTT) + ((1 - alpha) *sample)
+  RTT = new_rtt
   sock.settimeout(math.ceil(2 * RTT))
   
 def handle_packet_send(msg_obj):
@@ -173,6 +170,32 @@ while True and BUFFER:
         elif int(decoded['ack']) <= lowest_seq - DATA_SIZE:
           # ignore duplicate packet
           log('duplicate packet received. ack: ' + str(decoded['ack']))
+          # if we found a duplicate look through acks we have saved
+          log("BUFFER")
+          if (BUFFER):
+            for decoded in RECEIVED_ACKS:
+              # (data, addr) = ack
+              # decoded = json.loads(data.decode())
+              lowest_seq = min(BUFFER.keys())
+              if decoded['ack'] == lowest_seq:
+                resend = False
+                print('removing ' + str(lowest_seq) + "from buffer")
+                # Remove the ack-ed sequence from the buffer and get the stored value
+                acked_packet = BUFFER.pop(lowest_seq)
+                rtt_start = acked_packet.rtt_start
+                calculate_rtt(rtt_start, rtt_stop)
+                # Try to send next packet
+                sent_packet = send_next_packet()
+                if sent_packet:
+                  BUFFER[SEQUENCE] = sent_packet
+                else:
+                  # No more packets to send. Wait for other acks
+                  print('packet not sent')
+                  pass
+                # if we removed the last item from the buffer break out of loop
+                if (not BUFFER):
+                      break
+
           continue
         # Ack received out of sequence, meaning that a packet was dropped before from receiver to sender
         else:
@@ -180,25 +203,7 @@ while True and BUFFER:
           resend = True
           # we want to add the received ack to RECEIVED_ACKS, and also check if any acks in received acks are now in order
           RECEIVED_ACKS.append(decoded)
-          for decoded in RECEIVED_ACKS:
-            # (data, addr) = ack
-            # decoded = json.loads(data.decode())
-            lowest_seq = min(BUFFER.keys())
-            if decoded['ack'] == lowest_seq:
-              resend = False
-              print('removing ' + str(lowest_seq) + "from buffer")
-              # Remove the ack-ed sequence from the buffer and get the stored value
-              acked_packet = BUFFER.pop(lowest_seq)
-              rtt_start = acked_packet.rtt_start
-              calculate_rtt(rtt_start, rtt_stop)
-              # Try to send next packet
-              sent_packet = send_next_packet()
-              if sent_packet:
-                BUFFER[SEQUENCE] = sent_packet
-              else:
-                # No more packets to send. Wait for other acks
-                print('packet not sent')
-                pass
+          
           temp = decoded['ack']
           print(f'decoded_ack: {temp}, lowest_seq: {lowest_seq}')
           # Get packet with lowest sequence
@@ -224,6 +229,33 @@ while True and BUFFER:
     #   # TODO: possible packet drop from 3700recv?
     #   log("[error] timeout")
     #   sys.exit(-1)
+
+    # look through acks we have receieved each time to see if any are now in order
+    if (BUFFER):
+      for decoded in RECEIVED_ACKS:
+        # (data, addr) = ack
+        # decoded = json.loads(data.decode())
+        lowest_seq = min(BUFFER.keys())
+        if decoded['ack'] == lowest_seq:
+          resend = False
+          print('removing ' + str(lowest_seq) + "from buffer")
+          # Remove the ack-ed sequence from the buffer and get the stored value
+          acked_packet = BUFFER.pop(lowest_seq)
+          rtt_start = acked_packet.rtt_start
+          calculate_rtt(rtt_start, rtt_stop)
+          # Try to send next packet
+          sent_packet = send_next_packet()
+          if sent_packet:
+            BUFFER[SEQUENCE] = sent_packet
+          else:
+            # No more packets to send. Wait for other acks
+            print('packet not sent')
+            pass
+          # if we removed the last item from the buffer break out of loop
+          if (not BUFFER):
+                break
+
+
   except socket.timeout:
     # If packet has taken longer than 2x RTT, Resend packets in buffer
     for seq in BUFFER.keys():
@@ -235,5 +267,16 @@ while True and BUFFER:
       # Update the packet in the buffer with the new time sent at
       BUFFER[seq] = new_packet_info
 
-sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": True}).encode(), dest)
+sock.settimeout(5)
+
+for x in range(10):
+  sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": True}).encode(), dest)
+
+while True:
+  try:
+    result = sock.recvfrom(MSG_SIZE)
+    break
+  except:
+    log("receiver got final ack and closed connection")
+    break
 sys.exit(0)
