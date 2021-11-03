@@ -37,7 +37,7 @@ log("[bound] " + str(UDP_PORT))
 
 
 
-WINDOW_SIZE = 64
+WINDOW_SIZE = 96
 OUT_OF_ORDER_PACKETS = set()
 SENT_ACKS = []
 
