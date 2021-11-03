@@ -37,98 +37,72 @@ log("[bound] " + str(UDP_PORT))
 
 
 
-new_data = None
-last_mesg = None
-last_addr = None
+WINDOW_SIZE = 64
 OUT_OF_ORDER_PACKETS = set()
 SENT_ACKS = []
 
 # Now listen for packets
 while True:
   log("listening for packets")
-  # result = None
-  # if new_data == None:
-  #   result = sock.recvfrom(MSG_SIZE)
-  # else:
-  #   result = new_data
-
   result = sock.recvfrom(MSG_SIZE)
-        
-
-  if not result:
-    # resend last message, didn't arrive to sender
-    sent = sock.sendto(last_mesg.encode(), last_addr)
-    log("[sent_bytes_again] " + str(sent))
-
 
   # If nothing is ready, we hit the timeout
   if result:
     (data, addr) = result
-
     try:
       decoded = json.loads(data.decode())
       # log("decoded:" + str(decoded))
-      # if the sequence number is 0 then we know this is the handshake, send default ack mesg
+      # if the sequence number is 0 then we know this is the handshake, send handshake ack
       curr_sequence = decoded['sequence']
       if (NEXT_SEQ == 0):
             curr_sequence += 1
             NEXT_SEQ = curr_sequence 
-            default_handshake = json.dumps({"ack": NEXT_SEQ, "window": 5})
-            last_mesg = default_handshake
-            last_addr = addr
+            default_handshake = json.dumps({"ack": NEXT_SEQ, "window": WINDOW_SIZE})
             log("HANDSHAKE: ABOUT TO SEND " + default_handshake)
             sent = sock.sendto(default_handshake.encode(), addr)
             log("[sent] " + str(sent))
 
-      # the handshake isn't complete
+      # the handshake isn't complete, resend the handshake ack
       if not decoded["ack"]:
-        default_handshake = json.dumps({"ack": NEXT_SEQ, "window": 5})
+        default_handshake = json.dumps({"ack": NEXT_SEQ, "window": WINDOW_SIZE})
         sent = sock.sendto(default_handshake.encode(), addr)
         log("[sent again] " + str(sent))
         continue
-            
-
 
       # If the EOF flag is set, exit
       if (decoded["eof"]):
         log("[completed]")
         # TODO: send ack back saying you've received?
+        # One of these should reach
         for x in range(15):
             last_msg = json.dumps({"eof": True, "data": "", "sequence": decoded["sequence"], "ack": True})
             sent = sock.sendto(last_msg.encode(), addr)
-    
         sys.exit(0)
 
-
-      # TODO: for the last packet this is happening continuously and shouldnt be
+      # If the received packet has previously been ACKed, dont update NEXT_SEQ and resend ack
       if (result in SENT_ACKS):
-        log("looking through already sent acks")
+        log("Duplicate message. Looking through sent ACKs")
         (data, addr) = result
         stored_decoded = json.loads(data.decode())
         data = b64decode(stored_decoded['data'].encode())
         updated_seq = stored_decoded['sequence'] + len(data)
         msg = json.dumps({"ack": updated_seq})
+        log(msg)
         sent = sock.sendto(msg.encode(), addr)
         log("[sent_ack_again] " + str(sent))  
 
-      
-
-      # If there is data, we accept it and print it out
+      # If this is not duplicate data 
       elif (decoded['data']):
         log('SEQ: ' + str(decoded['sequence']))
         log('NEXT_SEQ: ' + str(NEXT_SEQ))
-        # This is not a duplicate data
         data = b64decode(decoded['data'].encode())
-
+        # If the packet was received in order
         if decoded['sequence'] == NEXT_SEQ:
           log("[recv data] " + str(NEXT_SEQ) + " (" + str(len(data)) + ") ACCEPTED (in-order)")
           sys.stdout.buffer.write(data)
           updated_seq = decoded['sequence'] + len(data)
           log("updated sequence: " + str(updated_seq))
           msg = json.dumps({"ack": updated_seq})
-          last_mesg = msg
-          last_addr = addr
-
           sent = sock.sendto(msg.encode(), addr)
           log("[sent_bytes] " + str(sent))
           # keep track of sent acks
@@ -137,15 +111,11 @@ while True:
           if sent < len(msg):
             log("[error] unable to fully send packet")
         else:
-          # Ignore duplicate
-          # TODO: How to handle packet drops from receiver's end
-
           log("adding" + str(decoded['sequence']) + "to received list")
 
           # we want to save the packet we just got to OUT_OF_ORDER_PACKETS, so we can receive it later
           OUT_OF_ORDER_PACKETS.add(result)
           # then look through current OUT_OF_ORDER_PACKETS, to see if any are now in order
-          # TODO: might need to copy and remove packets once we have acked them
           for result in OUT_OF_ORDER_PACKETS:
             (data, addr) = result
             stored_decoded = json.loads(data.decode())
@@ -156,22 +126,17 @@ while True:
               updated_seq = stored_decoded['sequence'] + len(data)
               log("updated sequence: " + str(updated_seq))
               msg = json.dumps({"ack": updated_seq})
-              last_mesg = msg
-              last_addr = addr
-
               sent = sock.sendto(msg.encode(), addr)
               log("[sent_bytes] " + str(sent) + "packet: " + str(msg))
               SENT_ACKS.append(result)
               NEXT_SEQ = updated_seq
+              
               if sent < len(msg):
                 log("[error] unable to fully send packet")
 
-              
-      
-
     except (ValueError, KeyError, TypeError) as e:
       log("[recv corrupt packet]")
-      print(decoded)
+      log(str(decoded))
       raise e
 
   else: 
